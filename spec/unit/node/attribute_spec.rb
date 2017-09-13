@@ -171,6 +171,7 @@ describe Chef::Node::Attribute do
     }
     @automatic_hash = { "week" => "friday" }
     @attributes = Chef::Node::Attribute.new(@attribute_hash, @default_hash, @override_hash, @automatic_hash, node)
+    allow(node).to receive(:attributes).and_return(@attributes)
   end
 
   describe "initialize" do
