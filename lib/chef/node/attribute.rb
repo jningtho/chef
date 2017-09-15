@@ -206,6 +206,7 @@ class Chef
         @automatic      = VividMash.new(automatic, self, node, :automatic)
 
         @deep_merge_cache = ImmutableMash.new({}, self, node, :merged)
+        @__node__ = node
       end
 
        # Debug what's going on with an attribute. +args+ is a path spec to the
@@ -299,7 +300,7 @@ class Chef
 
        # clears attributes from all precedence levels
       def rm(*args)
-        with_deep_merged_return_value(self, *args) do
+        with_deep_merged_return_value(combined_all, *args) do
           rm_default(*args)
           rm_normal(*args)
           rm_override(*args)
@@ -407,6 +408,20 @@ class Chef
        # all of node['foo'] even if the user only requires node['foo']['bar']['baz'].
        #
 
+       # FIXME: dup
+      def combined_override(*path)
+        merge_overrides(path)
+      end
+
+       # FIXME: de-immutablize and dup
+      def combined_all(*path)
+      end
+
+       # FIXME: dup
+      def combined_default(*path)
+        merge_defaults(path)
+      end
+
       def normal_unless(*args)
         return Decorator::Unchain.new(self, :normal_unless) unless args.length > 0
         write(:normal, *args) if normal.read(*args[0...-1]).nil?
@@ -481,14 +496,6 @@ class Chef
         @deep_merge_cache
       end
 
-      def combined_default
-        @deep_merge_cache
-      end
-
-      def combined_override
-        @deep_merge_cache
-      end
-
       def inspect
         "#<#{self.class} " << (COMPONENTS + [:@merged_attributes, :@properties]).map do |iv|
           "#{iv}=#{instance_variable_get(iv).inspect}"
@@ -497,9 +504,105 @@ class Chef
 
       private
 
+       # Helper method for merge_defaults/merge_overrides.
+       #
+       # apply_path(thing, [ "foo", "bar", "baz" ]) = thing["foo"]["bar"]["baz"]
+       #
+       # The path value can be nil in which case the whole component is returned.
+       #
+       # It returns nil (does not raise an exception) if it walks off the end of an Mash/Hash/Array, it does not
+       # raise any TypeError if it attempts to apply a hash key to an Integer/String/TrueClass, and just returns
+       # nil in that case.
+       #
+      def apply_path(component, path)
+        path ||= []
+        path.inject(component) do |val, path_arg|
+          if val.respond_to?(:[])
+            # Have an Array-like or Hash-like thing
+            if !val.respond_to?(:has_key?)
+              # Have an Array-like thing
+              val[path_arg]
+            elsif val.has_key?(path_arg)
+              # Hash-like thing (must check has_key? first to protect against Autovivification)
+              val[path_arg]
+            else
+              nil
+            end
+          else
+            nil
+          end
+        end
+      end
+
+       # Deep merge the default attribute levels with array merging.
+       #
+       # The path allows for selectively deep-merging a subtree of the node object.
+       #
+       # @param path [Array] Array of args to method chain to descend into the node object
+       # @return [attr] Deep Merged values (may be VividMash, Hash, Array, etc) from the node object
+      def merge_defaults(path)
+        ret = DEFAULT_COMPONENTS.inject(NIL) do |merged, component_ivar|
+          component_value = apply_path(instance_variable_get(component_ivar), path)
+          deep_merge!(merged, component_value)
+        end
+        ret == NIL ? nil : ret
+      end
+
+       # Deep merge the override attribute levels with array merging.
+       #
+       # The path allows for selectively deep-merging a subtree of the node object.
+       #
+       # @param path [Array] Array of args to method chain to descend into the node object
+       # @return [attr] Deep Merged values (may be VividMash, Hash, Array, etc) from the node object
+      def merge_overrides(path)
+        ret = OVERRIDE_COMPONENTS.inject(NIL) do |merged, component_ivar|
+          component_value = apply_path(instance_variable_get(component_ivar), path)
+          deep_merge!(merged, component_value)
+        end
+        ret == NIL ? nil : ret
+      end
+
        # needed for __path__
       def convert_key(key)
         key.kind_of?(Symbol) ? key.to_s : key
+      end
+
+      NIL = Object.new
+
+      # @api private
+      def deep_merge!(merge_onto, merge_with)
+        # If there are two Hashes, recursively merge.
+        if merge_onto.kind_of?(Hash) && merge_with.kind_of?(Hash)
+          merge_with.each do |key, merge_with_value|
+            value =
+              if merge_onto.has_key?(key)
+                deep_merge!(safe_dup(merge_onto[key]), merge_with_value)
+              else
+                merge_with_value
+              end
+
+            # internal_set bypasses converting keys, does convert values and allows writing to immutable mashes
+            merge_onto.internal_set(key, value)
+          end
+          merge_onto
+
+        elsif merge_onto.kind_of?(Array) && merge_with.kind_of?(Array)
+          merge_onto |= merge_with
+
+        # If merge_with is nil, don't replace merge_onto
+        elsif merge_with.nil?
+          merge_onto
+
+        # In all other cases, replace merge_onto with merge_with
+        else
+          if merge_with.kind_of?(Hash)
+            Chef::Node::VividMash.new(merge_with)
+          elsif merge_with.kind_of?(Array)
+            Chef::Node::AttrArray.new(merge_with)
+          else
+            merge_with
+          end
+        end
       end
 
     end
